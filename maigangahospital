@@ -1,0 +1,113 @@
+#!/bin/bash
+if [ "$(whoami)" != "bahmni" ]; then
+        echo "*** ATTENTION PLEASE!!! SCRIPT MUST BE RUN AS bahmni USER"
+        exit -1
+fi
+echo "*** Starting cameroon implementation setup"
+sudo -v
+echo -n Please enter mysql root password: 
+read -s mysql_password
+echo
+echo
+echo -n Please enter a patient identifier prefix for this clinic: 
+read identifier_prefix
+
+echo "*** Deleting existing sources"
+cd ~
+rm -rf git
+rm -rf ~/cameroon-bahmniapps
+rm -rf dist-v1.9.0.zip
+echo "*** Completed deleting existing sources"
+
+echo "*** Updating identifier prefix"
+mysql -uroot -p$mysql_password openmrs -e "update idgen_seq_id_gen set prefix = \"$identifier_prefix\", max_length=30 where id=4;"
+echo "*** Completed updating identifier prefix"
+
+echo "*** Installing git"
+sudo yum install git
+echo "*** Completed installing git"
+
+echo "*** Creating git folder"
+mkdir -p ~/git
+echo "*** Completed creating git folder"
+
+echo "*** Setup bahmniapps"
+cd ~
+wget -c https://github.com/jembi/cameroon-openmrs-module-bahmniapps/releases/download/v1.9.0/dist-v1.9.0.zip
+rm -rf ~/cameroon-bahmniapps
+mkdir -p ~/cameroon-bahmniapps
+unzip -q ~/dist-v1.9.0.zip -d ~/cameroon-bahmniapps
+sudo rm -rf /opt/bahmni-web/etc/bahmniapps
+sudo ln -s ~/cameroon-bahmniapps/ /opt/bahmni-web/etc/bahmniapps
+sudo chown -h bahmni:bahmni /opt/bahmni-web/etc/bahmniapps
+echo "*** Completed bahmni UI dist setup"
+
+echo "*** Setup bahmni-config"
+cd ~/git
+git clone git://github.com/jembi/cameroon-bahmni-config.git
+cd cameroon-bahmni-config
+git checkout v1.9.0
+
+sudo rm -rf /opt/bahmni-web/etc/bahmni_config
+sudo ln -s ~/git/cameroon-bahmni-config /opt/bahmni-web/etc/bahmni_config
+sudo chown -h bahmni:bahmni /opt/bahmni-web/etc/bahmni_config
+
+sudo rm -rf /opt/openmrs/configuration
+sudo ln -s ~/git/cameroon-bahmni-config/metadata/configuration /opt/openmrs/configuration
+sudo chown -h bahmni:bahmni /opt/openmrs/configuration
+
+echo "===> Moving diagnosis csv files for faster installation"
+mv /opt/openmrs/configuration/concepts/1150_diagnosis.csv ~
+mv /opt/openmrs/configuration/concepts/1170_diagnosis_sets.csv ~
+
+sudo rm -rf /var/www/html
+sudo ln -s ~/git/cameroon-bahmni-config/html /var/www/html
+sudo chown -h bahmni:bahmni /var/www/html
+
+sudo rm -rf /opt/openmrs/modules
+sudo ln -s ~/git/cameroon-bahmni-config/omods/modules /opt/openmrs/modules
+sudo chown -h bahmni:bahmni /opt/openmrs/modules
+
+echo "*** Completed bahmni-config setup"
+
+echo "*** Restarting openmrs. This might take up to 20 minutes."
+OPEMRSLOGDIR="/opt/openmrs/log"
+OPEMRSBACKUPLOGDIR="/opt/openmrs/old_logs"
+HOUR=`date +%d_%m_%Y_%H_%M_%S`
+sudo mkdir -p $OPEMRSBACKUPLOGDIR/$HOUR
+counter=0
+sudo mv $OPEMRSLOGDIR/* $OPEMRSBACKUPLOGDIR/$HOUR
+sudo service openmrs restart
+while ! grep "InitializerActivator - Start of initializer module." /opt/openmrs/log/openmrs.log;
+do
+echo "Openmrs busy restarting..."
+counter=$((counter+1))
+echo "*** Time elapsed : " $counter
+sleep 60
+done
+sleep 60
+echo "*** Completed restarting openmrs"
+
+echo "*** Openmrs sql scripts setup"
+mysql -uroot -p$mysql_password openmrs < <(cat /home/bahmni/git/cameroon-bahmni-config/metadata/sql/*.sql)
+mysql -uroot -p$mysql_password openmrs < <(cat /home/bahmni/git/cameroon-bahmni-config/metadata/reportssql/*.sql)
+echo "*** Completed openmrs sql scripts setup"
+
+echo "*** Openelis setup"
+cd ~/git
+git clone git://github.com/jembi/cameroon-openelis.git
+cd cameroon-openelis
+git checkout v1.8.1
+cd deployment-artifacts
+rm -rf openelis
+mkdir openelis
+unzip -q openelis.war -d openelis
+sudo service bahmni-lab stop
+sudo rm -rf /opt/bahmni-lab/bahmni-lab
+sudo ln -s /home/bahmni/git/cameroon-openelis/deployment-artifacts/openelis /opt/bahmni-lab/bahmni-lab
+psql -U clinlims -d clinlims -a -f /home/bahmni/git/cameroon-bahmni-config/metadata/postgresql/activate_departments_and_sample_types.sql
+psql -U clinlims -d clinlims -a -f /home/bahmni/git/cameroon-bahmni-config/metadata/postgresql/add_test_ranges.sql
+sudo service bahmni-lab start
+echo "*** Completed openelis setup"
+echo "****************************"
+echo "*** Setup completed ***"
